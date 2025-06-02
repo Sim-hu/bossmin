@@ -1,0 +1,7 @@
+discord.py
+python-dotenv  
+aiosqlite  
+psutil  
+asyncio  
+aiohttp  
+colorlog 

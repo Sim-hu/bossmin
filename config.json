@@ -1,0 +1,68 @@
+{
+    "guilds": {
+        "1174347213464416357": {
+            "photo_archive_channel": null,
+            "log_channel": 1299170472629637160,
+            "vc_log_channel": null,
+            "mod_log_channel": null,
+            "banned_words": [],
+            "spam_settings": {
+                "message_count": 5,
+                "time_window": 5,
+                "action": "timeout",
+                "timeout_duration": 300
+            }
+        },
+        "1290772639287349350": {
+            "photo_archive_channel": null,
+            "log_channel": 1300412490122924042,
+            "vc_log_channel": 1300412569538007062,
+            "mod_log_channel": null,
+            "banned_words": [],
+            "spam_settings": {
+                "message_count": 5,
+                "time_window": 5,
+                "action": "timeout",
+                "timeout_duration": 300
+            }
+        },
+        "981538496625913856": {
+            "photo_archive_channel": null,
+            "log_channel": 982845135660412969,
+            "vc_log_channel": null,
+            "mod_log_channel": null,
+            "banned_words": [],
+            "spam_settings": {
+                "message_count": 5,
+                "time_window": 5,
+                "action": "timeout",
+                "timeout_duration": 300
+            }
+        },
+        "1291668370806014003": {
+            "photo_archive_channel": null,
+            "log_channel": 1301219631599452160,
+            "vc_log_channel": null,
+            "mod_log_channel": null,
+            "banned_words": [],
+            "spam_settings": {
+                "message_count": 5,
+                "time_window": 5,
+                "action": "timeout",
+                "timeout_duration": 300
+            }
+        }
+    },
+    "global": {
+        "log_channels": {},
+        "vc_log_channels": {},
+        "photo_archive_channel": 1303556598115074048,
+        "banned_words": [],
+        "spam_settings": {
+            "message_count": 5,
+            "time_window": 5,
+            "action": "timeout",
+            "timeout_duration": 300
+        }
+    }
+}
