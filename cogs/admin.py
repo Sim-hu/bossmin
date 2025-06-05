@@ -1,10 +1,10 @@
 import discord
 from discord.ext import commands
 from discord import app_commands, Interaction, TextChannel, User, Forbidden, HTTPException
-from datetime import datetime, timezone
-from utils.checks import BaseCog
+from datetime import datetime, timezone, timedelta
 import logging
-from typing import List, Tuple, Optional, Dict  
+from typing import List, Tuple, Optional, Dict
+import io
 
 class AdminCog(commands.Cog):
     def __init__(self, bot):
@@ -147,6 +147,384 @@ class AdminCog(commands.Cog):
                 "❌ 設定の取得中にエラーが発生しました。",
                 ephemeral=True
             )
+
+    async def create_delete_log_file(self, messages: List[discord.Message], deleted_by: discord.Member) -> discord.File:
+        """削除されたメッセージのログファイルを作成"""
+        # 日本時間のタイムゾーン
+        JST = timezone(timedelta(hours=9))
+        
+        content = []
+        content.append(f"=== メッセージ削除ログ ===")
+        content.append(f"削除実行者: {deleted_by.name} ({deleted_by.id})")
+        content.append(f"削除日時: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST")
+        content.append(f"削除数: {len(messages)}")
+        content.append("=" * 50)
+        content.append("")
+        
+        for msg in sorted(messages, key=lambda x: x.created_at):
+            # メッセージの投稿日時を日本時間に変換
+            msg_time_jst = msg.created_at.replace(tzinfo=timezone.utc).astimezone(JST)
+            timestamp = msg_time_jst.strftime("%Y-%m-%d %H:%M:%S")
+            
+            author = f"{msg.author.name}#{msg.author.discriminator}"
+            content.append(f"[{timestamp} JST] {author} ({msg.author.id})")
+            if msg.content:
+                content.append(f"内容: {msg.content}")
+            if msg.attachments:
+                content.append("添付ファイル:")
+                for attachment in msg.attachments:
+                    content.append(f"  - {attachment.filename} ({attachment.size} bytes)")
+                    content.append(f"    URL: {attachment.url}")
+            content.append("-" * 30)
+            content.append("")
+        
+        content_text = "\n".join(content)
+        return discord.File(
+            io.StringIO(content_text),
+            filename=f"deleted_messages_{datetime.now(JST).strftime('%Y%m%d_%H%M%S')}.txt"
+        )
+
+    async def send_delete_log_with_images(self, interaction: discord.Interaction, messages: List[discord.Message], 
+                                         saved_images: List[dict], delete_type: str, 
+                                         target_user: Optional[discord.User] = None,
+                                         scope: Optional[str] = None):
+        """削除ログを送信（保存した画像データと共に）"""
+        logging_cog = await self.get_logging_cog()
+        if not logging_cog:
+            return
+        
+        # 日本時間のタイムゾーン
+        JST = timezone(timedelta(hours=9))
+        
+        embed = discord.Embed(
+            title="メッセージ削除ログ",
+            color=discord.Color.red(),
+            timestamp=datetime.now(timezone.utc)
+        )
+        
+        # 削除実行者
+        embed.add_field(
+            name="実行者",
+            value=f"{interaction.user.mention} ({interaction.user.name})",
+            inline=True
+        )
+        
+        # 削除タイプ
+        if delete_type == "bulk":
+            embed.add_field(name="削除タイプ", value="一括削除", inline=True)
+        elif delete_type == "user":
+            embed.add_field(
+                name="削除タイプ", 
+                value=f"ユーザー指定削除 ({'グローバル' if scope == 'global' else 'チャンネル内'})",
+                inline=True
+            )
+        
+        # 削除対象ユーザー（user削除の場合）
+        if target_user:
+            embed.add_field(
+                name="対象ユーザー",
+                value=f"{target_user.mention} ({target_user.name})",
+                inline=True
+            )
+        
+        # チャンネル情報
+        if scope == "global" and messages:
+            # グローバル削除の場合、影響を受けたチャンネルをリスト
+            channels = list(set(msg.channel for msg in messages))
+            channel_mentions = [f"{ch.mention}" for ch in channels[:5]]  # 最大5つまで表示
+            if len(channels) > 5:
+                channel_mentions.append(f"他 {len(channels) - 5} チャンネル")
+            embed.add_field(
+                name="影響チャンネル",
+                value="\n".join(channel_mentions),
+                inline=False
+            )
+        else:
+            # 特定チャンネルでの削除
+            embed.add_field(
+                name="チャンネル",
+                value=f"{interaction.channel.mention}\n[ジャンプ]({interaction.channel.jump_url})",
+                inline=True
+            )
+        
+        # 削除数
+        embed.add_field(
+            name="削除メッセージ数",
+            value=f"{len(messages)} 件",
+            inline=True
+        )
+        
+        # ログファイルを作成
+        log_file = await self.create_delete_log_file(messages, interaction.user)
+        
+        # ログチャンネルを取得
+        log_channel = await logging_cog.get_log_channel(interaction.guild_id)
+        if not log_channel:
+            return
+            
+        # メインのログを送信
+        await log_channel.send(embed=embed, file=log_file)
+        
+        # 保存した画像をログチャンネルに送信
+        if saved_images:
+            # 画像をまとめて送信（最大10ファイルまで）
+            image_files = []
+            for i, img_info in enumerate(saved_images[:10]):
+                file = discord.File(
+                    io.BytesIO(img_info['data']),
+                    filename=f"{i}_{img_info['filename']}"
+                )
+                image_files.append(file)
+            
+            if image_files:
+                await log_channel.send(
+                    content="**削除されたメッセージに含まれていた画像:**",
+                    files=image_files
+                )
+                
+                # 10個を超える画像がある場合は通知
+                if len(saved_images) > 10:
+                    await log_channel.send(f"*他に {len(saved_images) - 10} 個の画像がありました（ログファイルを参照）*")
+        
+        # アーカイブチャンネルへの保存
+        archive_channel = logging_cog.get_archive_channel()
+        if archive_channel and saved_images:
+            for img_info in saved_images:
+                try:
+                    msg = img_info['message']
+                    
+                    # アーカイブ用のEmbed作成
+                    archive_embed = discord.Embed(
+                        title="管理コマンドで削除された画像",
+                        color=discord.Color.blue(),
+                        timestamp=datetime.now(timezone.utc)
+                    )
+                    archive_embed.add_field(
+                        name="削除実行者",
+                        value=f"{interaction.user.name} (`{interaction.user.id}`)",
+                        inline=False
+                    )
+                    archive_embed.add_field(
+                        name="元のサーバー",
+                        value=f"{msg.guild.name} (`{msg.guild.id}`)",
+                        inline=False
+                    )
+                    archive_embed.add_field(
+                        name="元のチャンネル",
+                        value=f"#{msg.channel.name} (`{msg.channel.id}`)",
+                        inline=False
+                    )
+                    archive_embed.add_field(
+                        name="元の投稿者",
+                        value=f"{msg.author.name} (`{msg.author.id}`)",
+                        inline=False
+                    )
+                    
+                    # 画像ファイルを作成
+                    file = discord.File(
+                        io.BytesIO(img_info['data']),
+                        filename=img_info['filename']
+                    )
+                    
+                    # アーカイブチャンネルに送信
+                    await archive_channel.send(embed=archive_embed, file=file)
+                    
+                except Exception as e:
+                    self.logger.error(f"Error archiving image: {e}")
+    
+    async def send_delete_log(self, interaction: discord.Interaction, messages: List[discord.Message], 
+                            delete_type: str, target_user: Optional[discord.User] = None,
+                            scope: Optional[str] = None):
+        """削除ログを送信（画像なしの場合）"""
+        await self.send_delete_log_with_images(interaction, messages, [], delete_type, target_user, scope)
+
+    @app_commands.command(name="delete", description="指定した数のメッセージを削除")
+    @app_commands.describe(amount="削除するメッセージ数")
+    @app_commands.checks.has_permissions(manage_messages=True)
+    async def delete(self, interaction: discord.Interaction, amount: int):
+        """指定した数のメッセージを削除"""
+        if amount <= 0 or amount > 100:
+            await interaction.response.send_message("削除数は1〜100の間で指定してください。", ephemeral=True)
+            return
+        
+        await interaction.response.defer(ephemeral=True)
+        
+        try:
+            # LoggingCogを取得して、一時的に削除ログを無効化
+            logging_cog = await self.get_logging_cog()
+            if logging_cog:
+                # 削除コマンドのフラグを立てる
+                logging_cog._admin_delete_in_progress = True
+            
+            # メッセージを取得（コマンド自体は含まない）
+            messages = []
+            async for message in interaction.channel.history(limit=amount):
+                messages.append(message)
+            
+            if not messages:
+                await interaction.followup.send("削除するメッセージが見つかりませんでした。", ephemeral=True)
+                return
+            
+            # 削除前に画像データを保存
+            saved_images = []
+            for msg in messages:
+                if msg.attachments:
+                    for attachment in msg.attachments:
+                        if attachment.content_type and attachment.content_type.startswith('image/'):
+                            try:
+                                # 画像データをダウンロード
+                                img_data = await attachment.read()
+                                saved_images.append({
+                                    'data': img_data,
+                                    'filename': attachment.filename,
+                                    'message': msg,
+                                    'attachment': attachment
+                                })
+                            except Exception as e:
+                                self.logger.error(f"Failed to save image before deletion: {e}")
+            
+            # メッセージを削除
+            deleted_count = 0
+            deleted_messages = []
+            for message in messages:
+                try:
+                    await message.delete()
+                    deleted_messages.append(message)
+                    deleted_count += 1
+                except Exception as e:
+                    self.logger.error(f"Failed to delete message: {e}")
+            
+            # ログを送信（保存した画像データと共に）
+            if deleted_count > 0:
+                await self.send_delete_log_with_images(interaction, deleted_messages, saved_images, "bulk")
+            
+            # 結果を報告
+            await interaction.followup.send(
+                f"✅ {deleted_count}件のメッセージを削除しました。",
+                ephemeral=True
+            )
+            
+        except Exception as e:
+            self.logger.error(f"Error in delete command: {e}")
+            await interaction.followup.send(
+                "❌ メッセージの削除中にエラーが発生しました。",
+                ephemeral=True
+            )
+        finally:
+            # フラグをリセット
+            if logging_cog:
+                logging_cog._admin_delete_in_progress = False
+
+    @app_commands.command(name="userdelete", description="指定したユーザーのメッセージを削除")
+    @app_commands.describe(
+        user="対象ユーザー",
+        amount="削除するメッセージ数",
+        scope="削除範囲（global: サーバー全体, normal: このチャンネルのみ）"
+    )
+    @app_commands.choices(scope=[
+        app_commands.Choice(name="このチャンネルのみ", value="normal"),
+        app_commands.Choice(name="サーバー全体", value="global")
+    ])
+    @app_commands.checks.has_permissions(manage_messages=True)
+    async def userdelete(self, interaction: discord.Interaction, user: discord.User, amount: int, scope: str = "normal"):
+        """指定したユーザーのメッセージを削除"""
+        if amount <= 0 or amount > 100:
+            await interaction.response.send_message("削除数は1〜100の間で指定してください。", ephemeral=True)
+            return
+        
+        await interaction.response.defer(ephemeral=True)
+        
+        try:
+            # LoggingCogを取得して、一時的に削除ログを無効化
+            logging_cog = await self.get_logging_cog()
+            if logging_cog:
+                # 削除コマンドのフラグを立てる
+                logging_cog._admin_delete_in_progress = True
+            
+            messages_to_delete = []
+            
+            if scope == "normal":
+                # このチャンネルのみ
+                async for message in interaction.channel.history(limit=None):
+                    if message.author.id == user.id:
+                        messages_to_delete.append(message)
+                        if len(messages_to_delete) >= amount:
+                            break
+            else:
+                # サーバー全体
+                for channel in interaction.guild.text_channels:
+                    if len(messages_to_delete) >= amount:
+                        break
+                    
+                    try:
+                        async for message in channel.history(limit=None):
+                            if message.author.id == user.id:
+                                messages_to_delete.append(message)
+                                if len(messages_to_delete) >= amount:
+                                    break
+                    except discord.Forbidden:
+                        continue
+            
+            if not messages_to_delete:
+                await interaction.followup.send(
+                    f"{user.mention} のメッセージが見つかりませんでした。",
+                    ephemeral=True
+                )
+                return
+            
+            # 最新のものから指定数だけ取得
+            messages_to_delete = sorted(messages_to_delete, key=lambda x: x.created_at, reverse=True)[:amount]
+            
+            # 削除前に画像データを保存
+            saved_images = []
+            for msg in messages_to_delete:
+                if msg.attachments:
+                    for attachment in msg.attachments:
+                        if attachment.content_type and attachment.content_type.startswith('image/'):
+                            try:
+                                # 画像データをダウンロード
+                                img_data = await attachment.read()
+                                saved_images.append({
+                                    'data': img_data,
+                                    'filename': attachment.filename,
+                                    'message': msg,
+                                    'attachment': attachment
+                                })
+                            except Exception as e:
+                                self.logger.error(f"Failed to save image before deletion: {e}")
+            
+            # メッセージを削除
+            deleted_count = 0
+            deleted_messages = []
+            for message in messages_to_delete:
+                try:
+                    await message.delete()
+                    deleted_messages.append(message)
+                    deleted_count += 1
+                except Exception as e:
+                    self.logger.error(f"Failed to delete message: {e}")
+            
+            # ログを送信（保存した画像データと共に）
+            if deleted_count > 0:
+                await self.send_delete_log_with_images(interaction, deleted_messages, saved_images, "user", target_user=user, scope=scope)
+            
+            # 結果を報告
+            scope_text = "サーバー全体" if scope == "global" else "このチャンネル"
+            await interaction.followup.send(
+                f"✅ {scope_text}から {user.mention} のメッセージを{deleted_count}件削除しました。",
+                ephemeral=True
+            )
+            
+        except Exception as e:
+            self.logger.error(f"Error in userdelete command: {e}")
+            await interaction.followup.send(
+                "❌ メッセージの削除中にエラーが発生しました。",
+                ephemeral=True
+            )
+        finally:
+            # フラグをリセット
+            if logging_cog:
+                logging_cog._admin_delete_in_progress = False
 
     @app_commands.command(name="addword", description="禁止ワードを追加")
     @app_commands.checks.has_permissions(administrator=True)
@@ -341,225 +719,6 @@ class AdminCog(commands.Cog):
         except Exception as e:
             self.logger.error(f"Error in serverstats: {e}")
             await interaction.response.send_message("統計情報の取得中にエラーが発生しました。", ephemeral=True)
-
-    async def delete_messages_safely(self, messages, interaction):
-        """メッセージを安全に削除し、結果を返す補助メソッド"""
-        deleted = 0
-        old_messages = 0
-        errors = 0
-        
-        now = datetime.datetime.now(datetime.timezone.utc)
-        
-        # 14日以上経過したメッセージを分離
-        recent_messages = []
-        for msg in messages:
-            if (now - msg.created_at).days < 14:
-                recent_messages.append(msg)
-            else:
-                old_messages += 1
-        
-        # 一括削除（2以上のメッセージがある場合）
-        if len(recent_messages) >= 2:
-            try:
-                await interaction.channel.delete_messages(recent_messages)
-                deleted = len(recent_messages)
-            except Exception as e:
-                self.logger.error(f"Bulk delete error: {e}")
-                errors = len(recent_messages)
-        
-        # 残りのメッセージを個別に削除
-        elif len(recent_messages) == 1:
-            try:
-                await recent_messages[0].delete()
-                deleted = 1
-            except Exception as e:
-                self.logger.error(f"Single delete error: {e}")
-                errors = 1
-        
-        return deleted, old_messages, errors
-
-    @app_commands.command(name="delete", description="指定した数のメッセージを削除")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def delete(self, interaction: discord.Interaction, amount: int):
-        if amount <= 0:
-            await interaction.response.send_message("1以上の数を指定してください。", ephemeral=True)
-            return
-        
-        logging_cog = await self.get_logging_cog()
-        if not logging_cog:
-            await interaction.response.send_message("LoggingCogが見つかりませんでした。", ephemeral=True)
-            return
-        
-        await interaction.response.defer(ephemeral=True)
-        
-        try:
-            messages = []
-            async for message in interaction.channel.history(limit=amount + 1):
-                messages.append(message)
-            
-            # コマンドメッセージを除外
-            messages = messages[1:amount + 1]
-            
-            if not messages:
-                await interaction.followup.send("削除するメッセージが見つかりませんでした。", ephemeral=True)
-                return
-            
-            deleted, old_messages, errors = await self.delete_messages_safely(messages, interaction)
-            
-            # メッセージ削除の処理が完了した後、手動でログイベントを発火
-            if deleted > 0:
-                # 削除に成功したメッセージのみをログに記録
-                successfully_deleted = [msg for msg in messages if not (datetime.now(timezone.utc) - msg.created_at).days >= 14]
-                if successfully_deleted:
-                    # on_bulk_message_deleteイベントを手動で発火
-                    self.bot.dispatch('bulk_message_delete', successfully_deleted)
-            
-            # 結果レポートの作成
-            report = [f"削除試行数: {len(messages)}"]
-            if deleted > 0:
-                report.append(f"✅ 削除成功: {deleted}件")
-            if old_messages > 0:
-                report.append(f"⚠️ 14日超過のため削除不可: {old_messages}件")
-            if errors > 0:
-                report.append(f"❌ エラーで削除失敗: {errors}件")
-                
-            await interaction.followup.send("\n".join(report), ephemeral=True)
-            
-        except discord.Forbidden:
-            await interaction.followup.send("メッセージを削除する権限がありません。", ephemeral=True)
-        except Exception as e:
-            await interaction.followup.send(f"予期せぬエラーが発生しました: {str(e)}", ephemeral=True)
-            self.logger.error(f"delete command error: {e}")
-    
-    async def delete_messages_safely(self, messages: List[discord.Message], interaction: discord.Interaction) -> Tuple[int, int, int]:
-        """
-        メッセージを安全に削除し、結果を返す
-        
-        Returns:
-        --------
-        Tuple[int, int, int]
-            (削除成功数, 14日超過数, エラー数)
-        """
-        deleted = 0
-        old_messages = 0
-        errors = 0
-        
-        # メッセージを14日以内とそれ以外に分類
-        now = datetime.now(timezone.utc)
-        recent_messages = []
-        
-        for message in messages:
-            if (now - message.created_at).days >= 14:
-                old_messages += 1
-                continue
-            recent_messages.append(message)
-        
-        # 14日以内のメッセージを一括削除
-        if recent_messages:
-            try:
-                await interaction.channel.delete_messages(recent_messages)
-                deleted = len(recent_messages)
-            except discord.HTTPException as e:
-                self.logger.error(f"メッセージの一括削除中にエラー: {e}")
-                errors = len(recent_messages)
-                
-        return deleted, old_messages, errors
-
-    @app_commands.command(name="userdelete", description="指定したユーザーのメッセージを指定した数だけ削除")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def userdelete(self, interaction: discord.Interaction, user: discord.User, amount: int):
-        if amount <= 0:
-            await interaction.response.send_message("1以上の数を指定してください。", ephemeral=True)
-            return
-        
-        await interaction.response.defer(ephemeral=True)
-        
-        try:
-            text_channels = [ch for ch in interaction.guild.channels if isinstance(ch, discord.TextChannel)]
-            total_deleted = 0
-            total_old = 0
-            total_errors = 0
-            
-            for channel in text_channels:
-                if total_deleted >= amount:
-                    break
-                    
-                try:
-                    messages = []
-                    async for message in channel.history(limit=None):
-                        if message.author.id == user.id:
-                            messages.append(message)
-                            if len(messages) >= (amount - total_deleted):
-                                break
-                                
-                    if messages:
-                        deleted, old_messages, errors = await self.delete_messages_safely(messages, interaction)
-                        total_deleted += deleted
-                        total_old += old_messages
-                        total_errors += errors
-                        
-                except discord.Forbidden:
-                    continue
-                    
-            # 結果レポート
-            report = [f"{user.mention} のメッセージ削除結果:"]
-            report.append(f"削除試行数: {amount}")
-            if total_deleted > 0:
-                report.append(f"✅ 削除成功: {total_deleted}件")
-            if total_old > 0:
-                report.append(f"⚠️ 14日超過のため削除不可: {total_old}件")
-            if total_errors > 0:
-                report.append(f"❌ エラーで削除失敗: {total_errors}件")
-            
-            await interaction.followup.send("\n".join(report), ephemeral=True)
-            
-        except Exception as e:
-            await interaction.followup.send(f"エラーが発生しました: {str(e)}", ephemeral=True)
-            self.logger.error(f"userdelete command error: {e}")
-
-    @app_commands.command(name="userdeletech", description="指定したチャンネルの指定したユーザーのメッセージを指定した数だけ削除")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def userdeletech(self, interaction: discord.Interaction, user: discord.User, channel: discord.TextChannel, amount: int):
-        if amount <= 0:
-            await interaction.response.send_message("1以上の数を指定してください。", ephemeral=True)
-            return
-        
-        await interaction.response.defer(ephemeral=True)
-        
-        try:
-            messages = []
-            async for message in channel.history(limit=None):
-                if message.author.id == user.id:
-                    messages.append(message)
-                    if len(messages) >= amount:
-                        break
-            
-            if not messages:
-                await interaction.followup.send(
-                    f"{channel.mention} で {user.mention} のメッセージは見つかりませんでした。",
-                    ephemeral=True
-                )
-                return
-            
-            deleted, old_messages, errors = await self.delete_messages_safely(messages, interaction)
-            
-            # 結果レポート
-            report = [f"{channel.mention} での {user.mention} のメッセージ削除結果:"]
-            report.append(f"削除試行数: {len(messages)}")
-            if deleted > 0:
-                report.append(f"✅ 削除成功: {deleted}件")
-            if old_messages > 0:
-                report.append(f"⚠️ 14日超過のため削除不可: {old_messages}件")
-            if errors > 0:
-                report.append(f"❌ エラーで削除失敗: {errors}件")
-            
-            await interaction.followup.send("\n".join(report), ephemeral=True)
-            
-        except discord.Forbidden:
-            await interaction.followup.send("メッセージを削除する権限がありません。", ephemeral=True)
-        except Exception as e:
-            await interaction.followup.send(f"予期せぬエラーが発生しました: {str(e)}", ephemeral=True)
-            self.logger.error(f"userdeletech command error: {e}")
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(AdminCog(bot))
