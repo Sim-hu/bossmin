@@ -20,6 +20,7 @@ class LoggingCog(commands.Cog):
         self.log_channels = {}
         self.vc_log_channels = {}
         self.archive_channel = None
+        self._admin_delete_in_progress = False  # 管理者削除コマンドのフラグ
         self.load_config()
         
         # 各種ログ機能のインスタンスを作成
@@ -175,10 +176,16 @@ class LoggingCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message_delete(self, message):
+        # 管理者削除コマンドによる削除の場合はスキップ
+        if self._admin_delete_in_progress:
+            return
         await self.message_logging.on_message_delete(message)
 
     @commands.Cog.listener()
     async def on_bulk_message_delete(self, messages):
+        # 管理者削除コマンドによる削除の場合はスキップ
+        if self._admin_delete_in_progress:
+            return
         await self.message_logging.on_bulk_message_delete(messages)
 
     @commands.Cog.listener()
